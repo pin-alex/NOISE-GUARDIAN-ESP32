@@ -1,0 +1,21 @@
+NOISE-GUARDIAN-ESP32
+====================
+
+This repository contains original project code released under the MIT License.
+See [LICENSE](LICENSE) for the full text.
+
+Third-party software included in this repository
+-----------------------------------------------
+
+1. ES7210 driver
+   - Location: lib/es7210/
+   - Copyright: Espressif Systems (Shanghai) CO LTD
+   - License: Apache License 2.0
+   - Source notice preserved in:
+     - lib/es7210/es7210.h
+     - lib/es7210/es7210.c
+     - lib/es7210/es7210_reg.h
+   - Full license text: LICENSES/Apache-2.0.txt
+
+Unless otherwise noted, files outside lib/es7210/ are part of the original
+project and are covered by the repository MIT license.
