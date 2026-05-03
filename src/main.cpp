@@ -37,19 +37,36 @@
 // ── Audio-Einstellungen ───────────────────────────────────────────────────────
 #define SAMPLE_RATE   16000
 #define SAMPLE_COUNT  512      // Frames pro Messung (32 ms bei 16 kHz)
-#define SMOOTH_COUNT  8        // Gleitender Mittelwert über 8 Messungen (~256 ms)
 
-// ── Schwellenwerte (empirisch kalibrieren, siehe Kommentar in loop()) ─────────
-#define THRESHOLD_LOW   0.30f    // unter diesem Wert → GRÜN
-#define THRESHOLD_HIGH  0.70f    // über diesem Wert  → ROT
+// Exponentielles Smoothing (Single-Pole IIR), entspricht IEC-"Slow" τ ≈ 1 s.
+// α = T / (T + τ) mit T = 32 ms (Sample-Periode) und τ = 1 s → α ≈ 0.031.
+#define SMOOTH_ALPHA  0.031f
+
+// ── Hysterese-Schwellen (empirisch kalibrieren) ───────────────────────────────
+// Je Übergang separater Up-/Down-Trigger – verhindert Flackern direkt am Schwellwert.
+#define HYST_GREEN_TO_YELLOW  0.30f
+#define HYST_YELLOW_TO_GREEN  0.25f
+#define HYST_YELLOW_TO_RED    0.70f
+#define HYST_RED_TO_YELLOW    0.60f
+
+// ── Anzeige (RGB565) ──────────────────────────────────────────────────────────
+#define YELLOW_BLINK_MS       500       // Halbperiode des Gelb-Blinkens (≙ 1 Hz)
+#define COLOR_GREEN           0x07E0
+#define COLOR_YELLOW_BRIGHT   0xFFE0
+#define COLOR_YELLOW_DIM      0x8400    // dunkles Gelb-Oliv für die Off-Phase
+#define COLOR_RED             0xF800
+#define COLOR_BLACK           0x0000
 
 // ── State & Puffer ────────────────────────────────────────────────────────────
 enum TrafficLight { LIGHT_NONE = -1, LIGHT_GREEN, LIGHT_YELLOW, LIGHT_RED };
 
 static int16_t            audio_buf[SAMPLE_COUNT * 2];   // Stereo 16-bit
-static float              rms_history[SMOOTH_COUNT] = {};
-static uint8_t            rms_idx        = 0;
-static TrafficLight       current_light  = LIGHT_NONE;   // erzwingt ersten Draw
+static float              smooth_val      = 0.0f;
+static bool               smooth_init     = false;
+static TrafficLight       current_light   = LIGHT_NONE;
+static uint16_t           current_color   = 0xFFFF;       // ungültig → erzwingt ersten Draw
+static uint32_t           last_blink_ms   = 0;
+static bool               blink_dim_phase = false;        // false = hell, true = dunkel
 static es7210_dev_handle_t es7210_handle = NULL;
 
 // ── TCA9554PWR IO-Expander (steuert Display-Reset auf EXIO2) ─────────────────
@@ -397,33 +414,82 @@ static float compute_rms()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Gleitender Mittelwert über SMOOTH_COUNT letzte RMS-Werte
+// Exponentielles Smoothing (Single-Pole IIR), entspricht IEC-"Slow" τ ≈ 1 s.
+// Beim ersten Aufruf wird der Filter direkt auf den Messwert gesetzt, damit der
+// Startzustand nicht erst über ~1 s aus 0 einschwingen muss.
 // ─────────────────────────────────────────────────────────────────────────────
-static float smooth_rms(float new_val)
+static void update_smooth(float new_val)
 {
-    rms_history[rms_idx] = new_val;
-    rms_idx = (rms_idx + 1) % SMOOTH_COUNT;
-    float sum = 0.0f;
-    for (uint8_t i = 0; i < SMOOTH_COUNT; i++) sum += rms_history[i];
-    return sum / SMOOTH_COUNT;
+    if (!smooth_init) {
+        smooth_val  = new_val;
+        smooth_init = true;
+    } else {
+        smooth_val = SMOOTH_ALPHA * new_val + (1.0f - SMOOTH_ALPHA) * smooth_val;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Display nur bei Zustandswechsel neu einfärben
+// Zustandsübergänge mit Hysterese
 // ─────────────────────────────────────────────────────────────────────────────
-static void update_display(TrafficLight state)
+static TrafficLight next_state(TrafficLight current, float smooth)
 {
-    if (state == current_light) return;
-    current_light = state;
-
-    uint16_t color;
-    switch (state) {
-        case LIGHT_GREEN:  color = 0x07E0; break;   // RGB565 grün
-        case LIGHT_YELLOW: color = 0xFFE0; break;   // RGB565 gelb
-        case LIGHT_RED:    color = 0xF800; break;   // RGB565 rot
-        default:           color = 0x0000; break;
+    switch (current) {
+        case LIGHT_NONE:
+            // Erstaufruf: ohne Hysterese in den passenden Bucket einsortieren
+            if (smooth >= HYST_YELLOW_TO_RED)   return LIGHT_RED;
+            if (smooth >= HYST_GREEN_TO_YELLOW) return LIGHT_YELLOW;
+            return LIGHT_GREEN;
+        case LIGHT_GREEN:
+            if (smooth > HYST_GREEN_TO_YELLOW)  return LIGHT_YELLOW;
+            return LIGHT_GREEN;
+        case LIGHT_YELLOW:
+            if (smooth > HYST_YELLOW_TO_RED)    return LIGHT_RED;
+            if (smooth < HYST_YELLOW_TO_GREEN)  return LIGHT_GREEN;
+            return LIGHT_YELLOW;
+        case LIGHT_RED:
+            if (smooth < HYST_RED_TO_YELLOW)    return LIGHT_YELLOW;
+            return LIGHT_RED;
     }
-    gfx->fillScreen(color);
+    return LIGHT_GREEN;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Farbwahl je Zustand inkl. Blink-Phase für Gelb (Warnstufe).
+// ─────────────────────────────────────────────────────────────────────────────
+static uint16_t color_for_state(TrafficLight state, bool dim)
+{
+    switch (state) {
+        case LIGHT_GREEN:  return COLOR_GREEN;
+        case LIGHT_YELLOW: return dim ? COLOR_YELLOW_DIM : COLOR_YELLOW_BRIGHT;
+        case LIGHT_RED:    return COLOR_RED;
+        default:           return COLOR_BLACK;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Display non-blocking neu zeichnen, nur bei tatsächlicher Farbänderung.
+// Im Yellow-Zustand wird die Phase im YELLOW_BLINK_MS-Takt getoggelt (1 Hz).
+// ─────────────────────────────────────────────────────────────────────────────
+static void render(TrafficLight state)
+{
+    uint32_t now = millis();
+
+    if (state == LIGHT_YELLOW) {
+        if (now - last_blink_ms >= YELLOW_BLINK_MS) {
+            blink_dim_phase = !blink_dim_phase;
+            last_blink_ms   = now;
+        }
+    } else {
+        // Außerhalb von Gelb Blink-State zurücksetzen
+        blink_dim_phase = false;
+        last_blink_ms   = now;
+    }
+
+    uint16_t want_color = color_for_state(state, blink_dim_phase);
+    if (want_color != current_color) {
+        current_color = want_color;
+        gfx->fillScreen(want_color);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -470,16 +536,12 @@ void setup()
 // ─────────────────────────────────────────────────────────────────────────────
 void loop()
 {
-    float rms    = compute_rms();
-    float smooth = smooth_rms(rms);
+    float rms = compute_rms();
+    update_smooth(rms);
 
     // Kalibrierungs-Hilfe: Zeile einkommentieren, Serial Monitor öffnen (115200)
-    // Serial.printf("rms=%.5f smooth=%.5f\n", rms, smooth);
+    // Serial.printf("rms=%.5f smooth=%.5f\n", rms, smooth_val);
 
-    TrafficLight state;
-    if      (smooth < THRESHOLD_LOW)  state = LIGHT_GREEN;
-    else if (smooth < THRESHOLD_HIGH) state = LIGHT_YELLOW;
-    else                              state = LIGHT_RED;
-
-    update_display(state);
+    current_light = next_state(current_light, smooth_val);
+    render(current_light);
 }
