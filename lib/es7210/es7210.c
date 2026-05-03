@@ -5,6 +5,8 @@
  */
 
 #include <inttypes.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "es7210.h"
 #include "es7210_reg.h"
 #include "esp_log.h"
@@ -30,8 +32,8 @@ const static char *TAG = "ES7210";
 } while(0)
 
 struct es7210_dev_t {
-    i2c_port_t  i2c_port;
-    uint8_t     i2c_addr;
+    i2c_master_dev_handle_t i2c_dev;
+    uint8_t                 i2c_addr;
 };
 
 /**
@@ -127,27 +129,8 @@ static const coeff_div_t *es7210_get_coeff(uint32_t mclk, uint32_t lrck)
 static esp_err_t es7210_write_reg(es7210_dev_handle_t handle, uint8_t reg_addr, uint8_t reg_val)
 {
     ESP_RETURN_ON_FALSE(handle, ESP_ERR_INVALID_ARG, TAG, "invalid device handle");
-    esp_err_t ret = ESP_OK;
-
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    ESP_GOTO_ON_FALSE(cmd, ESP_ERR_NO_MEM, err, TAG, "memory allocation for i2c cmd handle failed");
-
-    ESP_GOTO_ON_ERROR(i2c_master_start(cmd), err, TAG, "error while appending i2c command");
-    ESP_GOTO_ON_ERROR(i2c_master_write_byte(cmd, handle->i2c_addr << 1 | I2C_MASTER_WRITE, true),
-                      err, TAG, "error while appending i2c command");
-    ESP_GOTO_ON_ERROR(i2c_master_write_byte(cmd, reg_addr, true), err,
-                      TAG, "error while appending i2c command");
-    ESP_GOTO_ON_ERROR(i2c_master_write_byte(cmd, reg_val, true), err,
-                      TAG, "error while appending i2c command");
-    ESP_GOTO_ON_ERROR(i2c_master_stop(cmd), err, TAG, "error while appending i2c command");
-
-    ESP_GOTO_ON_ERROR(i2c_master_cmd_begin(handle->i2c_port, cmd, pdMS_TO_TICKS(1000)),
-                      err, TAG, "error while writing register");
-err:
-    if (cmd) {
-        i2c_cmd_link_delete(cmd);
-    }
-    return ret;
+    uint8_t buf[2] = { reg_addr, reg_val };
+    return i2c_master_transmit(handle->i2c_dev, buf, sizeof(buf), pdMS_TO_TICKS(1000));
 }
 
 static esp_err_t es7210_set_i2s_format(es7210_dev_handle_t handle, es7210_i2s_fmt_t i2s_format,
@@ -264,8 +247,18 @@ esp_err_t es7210_new_codec(const es7210_i2c_config_t *i2c_conf, es7210_dev_handl
     struct es7210_dev_t *handle = calloc(1, sizeof(struct es7210_dev_t));
     ESP_RETURN_ON_FALSE(handle, ESP_ERR_NO_MEM, TAG, "memory allocation for device handler failed");
 
-    handle->i2c_port = i2c_conf->i2c_port;
     handle->i2c_addr = i2c_conf->i2c_addr;
+
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address  = i2c_conf->i2c_addr,
+        .scl_speed_hz    = 100000,
+    };
+    esp_err_t ret = i2c_master_bus_add_device(i2c_conf->bus_handle, &dev_cfg, &handle->i2c_dev);
+    if (ret != ESP_OK) {
+        free(handle);
+        return ret;
+    }
 
     *handle_out = handle;
     return ESP_OK;

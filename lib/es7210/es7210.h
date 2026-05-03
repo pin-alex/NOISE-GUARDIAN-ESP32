@@ -13,7 +13,7 @@
 
 #include <stdint.h>
 #include "esp_err.h"
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"
 
 /**
  * @brief I2C address of the ES7210
@@ -111,8 +111,8 @@ typedef struct es7210_dev_t *es7210_dev_handle_t;
  *
  */
 typedef struct {
-    i2c_port_t  i2c_port;           /*!< I2C port used to connecte ES7210 device */
-    uint8_t     i2c_addr;           /*!< I2C address of ES7210 device, can be 0x40 0x41 0x42 or 0x43 according to A0 and A1 pin */
+    i2c_master_bus_handle_t bus_handle; /*!< I2C master bus handle (from i2c_new_master_bus) */
+    uint8_t     i2c_addr;               /*!< I2C address of ES7210 device, can be 0x40 0x41 0x42 or 0x43 according to A0 and A1 pin */
 } es7210_i2c_config_t;
 
 /**

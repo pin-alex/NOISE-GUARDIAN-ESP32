@@ -83,8 +83,8 @@ No calibrated dB value is needed — the system works with relative loudness thr
 
 **Threshold constants** (`src/main.cpp`):
 ```cpp
-#define THRESHOLD_LOW   0.008f   // below → Green
-#define THRESHOLD_HIGH  0.025f   // above → Red
+#define THRESHOLD_LOW   0.30f    // below → Green
+#define THRESHOLD_HIGH  0.70f    // above → Red
 ```
 
 ---
